@@ -239,7 +239,8 @@ public class Http2MultiplexCodec extends Http2FrameCodec {
                     break;
                 }
                 // fall-trough
-                DefaultHttp2StreamChannel childChannel = new DefaultHttp2StreamChannel(stream, false);
+                DefaultHttp2StreamChannel childChannel = new DefaultHttp2StreamChannel(
+                        (Http2MultiplexCodecStream) stream, false);
                 ChannelFuture future = ctx.channel().eventLoop().register(childChannel);
                 if (future.isDone()) {
                     registerDone(future);
@@ -395,17 +396,22 @@ public class Http2MultiplexCodec extends Http2FrameCodec {
         READ_PROCESSED_OK_TO_PROCESS_MORE
     }
 
+    private boolean initialWritability(DefaultHttp2FrameStream stream) {
+        return isStreamIdValid(stream.id()) ? isWritable(stream) : ctx.channel().isWritable();
+    }
+
     // TODO: Handle writability changes due writing from outside the eventloop.
     private final class DefaultHttp2StreamChannel extends DefaultAttributeMap implements Http2StreamChannel {
         private final Http2StreamChannelConfig config = new Http2StreamChannelConfig(this);
         private final Http2ChannelUnsafe unsafe = new Http2ChannelUnsafe();
         private final ChannelId channelId;
         private final ChannelPipeline pipeline;
-        private final Http2FrameStream stream;
+        private final DefaultHttp2FrameStream stream;
         private final ChannelPromise closePromise;
         private final boolean outbound;
 
         private volatile boolean registered;
+        // We start with the writability of the channel when creating the StreamChannel.
         private volatile boolean writable;
 
         private boolean closePending;
@@ -428,9 +434,10 @@ public class Http2MultiplexCodec extends Http2FrameCodec {
         // channelReadComplete(...)
         DefaultHttp2StreamChannel next;
 
-        DefaultHttp2StreamChannel(Http2FrameStream stream, boolean outbound) {
+        DefaultHttp2StreamChannel(DefaultHttp2FrameStream stream, boolean outbound) {
             this.stream = stream;
             this.outbound = outbound;
+            writable = initialWritability(stream);
             ((Http2MultiplexCodecStream) stream).channel = this;
             pipeline = new DefaultChannelPipeline(this) {
                 @Override
@@ -484,8 +491,7 @@ public class Http2MultiplexCodec extends Http2FrameCodec {
 
         @Override
         public boolean isWritable() {
-            // TODO: Should we also take the parent channel into account ?
-            return isStreamIdValid(stream.id()) && writable;
+            return writable;
         }
 
         @Override
@@ -1011,6 +1017,9 @@ public class Http2MultiplexCodec extends Http2FrameCodec {
             private void firstWriteComplete(ChannelFuture future, ChannelPromise promise) {
                 Throwable cause = future.cause();
                 if (cause == null) {
+                    // As we just finished our first write which made the stream-id valid we need to re-evulate
+                    // the writability of the channel.
+                    writabilityChanged(Http2MultiplexCodec.this.isWritable(stream));
                     promise.setSuccess();
                 } else {
                     promise.setFailure(cause);
